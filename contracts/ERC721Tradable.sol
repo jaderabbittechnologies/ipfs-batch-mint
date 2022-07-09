@@ -4,100 +4,131 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/interfaces/IERC2981.sol";
 
-import "./common/meta-transactions/ContentMixin.sol";
-import "./common/meta-transactions/NativeMetaTransaction.sol";
-
-contract OwnableDelegateProxy {}
-
-/**
- * Used to delegate ownership of a contract to another address, to save on unneeded transactions to approve contract use for users
- */
-contract ProxyRegistry {
-    mapping(address => OwnableDelegateProxy) public proxies;
-}
+import "./ContentMixin.sol";
+import {EIP712Base} from "./EIP712Base.sol";
 
 /**
  * @title ERC721Tradable
  * ERC721Tradable - ERC721 contract that whitelists a trading address, and has minting functionality.
  */
-abstract contract ERC721Tradable is ERC721, ContextMixin, NativeMetaTransaction, Ownable {
-    using SafeMath for uint256;
-    using Counters for Counters.Counter;
+abstract contract ERC721Tradable is ERC721, ContextMixin, EIP712Base, Ownable, IERC2981 {
+    uint256 royaltyFee;
 
     /**
-     * We rely on the OZ Counter util to keep track of the next available ID.
-     * We track the nextTokenId instead of the currentTokenId to save users on gas costs. 
-     * Read more about it here: https://shiny.mirror.xyz/OUampBbIz9ebEicfGnQf5At_ReMHlZy0tB4glb9xQ0E
-     */ 
-    Counters.Counter private _nextTokenId;
-    address proxyRegistryAddress;
+     * The CIDs for off-chain token metadata on IPFS.
+     * Each batch of minted tokens has exactly one (1) IPFS CID used to construct the tokenURI for all tokens in that batch.
+     * Keys are the last valid tokenId in each minted batch.
+     */
+    mapping(uint256 => string) public cids;
+
+    /**
+     * An array of the last tokenId for each minted batch.
+     * The last element of endTokenIds is the number of total tokens minted.
+     * endTokenIds[0] = 0 upon contract construction
+     */
+    uint256[] public endTokenIds;
 
     constructor(
         string memory _name,
         string memory _symbol,
-        address _proxyRegistryAddress
+        uint256 _royaltyFee,
+        address _openseaProxyRegistryAddress,
+        address _looksrareTransferManagerAddress
     ) ERC721(_name, _symbol) {
-        proxyRegistryAddress = _proxyRegistryAddress;
-        // nextTokenId is initialized to 1, since starting at 0 leads to higher gas cost for the first minter
-        _nextTokenId.increment();
+        require(_royaltyFee <= 10000, "ERC2981 Royalties: Too high");
+        royaltyFee = _royaltyFee;
         _initializeEIP712(_name);
+
+        /**
+         * endTokenIds has first element 0 for contract functionality 
+         * The first element does not have a corresponding key in cids.
+         */
+
+        endTokenIds.push(0);
+        setApprovalForAll(_openseaProxyRegistryAddress, true);
+        setApprovalForAll(_looksrareTransferManagerAddress, true);
     }
 
     /**
-     * @dev Mints a token to an address with a tokenURI.
+     * @dev Mint tokens _startTokenId <= _tokenId <= _endTokenId to an address with a tokenURI.
+     * @dev tokenURI must be of form ipfs://<baseTokenCID>/<tokenId>
+     * @dev Ensure that the CID is correct at function call since it cannot be modified later!
+     * @dev This function should be called with a large batch size as few times as possible to reduce amortized gas cost per minted token.
      * @param _to address of the future owner of the token
+     * @param _startTokenId first tokenId of batch (inclusive)
+     * @param _endTokenId last tokenId of batch (inclusive)
+     * @param _baseTokenCID CID of the IPFS folder containing batch token metadata
      */
-    function mintTo(address _to) public onlyOwner {
-        uint256 currentTokenId = _nextTokenId.current();
-        _nextTokenId.increment();
-        _safeMint(_to, currentTokenId);
-    }
+    function mintBatchTo(
+        address _to,
+        uint256 _startTokenId,
+        uint256 _endTokenId,
+        string memory _baseTokenCID
+    ) public onlyOwner {
+        require(_startTokenId == endTokenIds[endTokenIds.length - 1] + 1, "tokenIds must be consecutive");
+        require(_startTokenId <= _endTokenId, "tokenIds must be increasing");
 
-    /**
-        @dev Returns the total tokens minted so far.
-        1 is always subtracted from the Counter since it tracks the next available tokenId.
-     */
-    function totalSupply() public view returns (uint256) {
-        return _nextTokenId.current() - 1;
-    }
-
-    function baseTokenURI() virtual public pure returns (string memory);
-
-    function tokenURI(uint256 _tokenId) override public pure returns (string memory) {
-        return string(abi.encodePacked(baseTokenURI(), Strings.toString(_tokenId)));
-    }
-
-    /**
-     * Override isApprovedForAll to whitelist user's OpenSea proxy accounts to enable gas-less listings.
-     */
-    function isApprovedForAll(address owner, address operator)
-        override
-        public
-        view
-        returns (bool)
-    {
-        // Whitelist OpenSea proxy contract for easy trading.
-        ProxyRegistry proxyRegistry = ProxyRegistry(proxyRegistryAddress);
-        if (address(proxyRegistry.proxies(owner)) == operator) {
-            return true;
+        for (uint256 _tokenId = _startTokenId; _tokenId <= _endTokenId; ++_tokenId) {
+            _safeMint(_to, _tokenId);
         }
 
-        return super.isApprovedForAll(owner, operator);
+        endTokenIds.push(_endTokenId);
+        cids[_endTokenId] = _baseTokenCID;
+    }
+
+    /**
+     *  @dev Returns the total tokens minted so far.
+     */
+    function totalSupply() public view returns (uint256) {
+        return endTokenIds[endTokenIds.length - 1];
+    }
+
+    function baseTokenCID(uint256 tokenId) public view returns (string memory) {
+        require(_exists(tokenId), "ERC721Metadata: URI query for nonexistent token");
+
+        // i initialized at 1 since tokenId > 0
+        for (uint256 i = 1; i < endTokenIds.length; ++i) {
+            if (tokenId <= endTokenIds[i]) {
+                return cids[endTokenIds[i]];
+            }
+        }
+        return "";
+    }
+
+    /**
+     * @dev tokenURI of form ipfs://<baseTokenCID>/<tokenId>
+     * It is assumed that all tokens in a batch have metadata files tokenId stored in a IPFS folder with CID baseTokenCID
+     */
+    function tokenURI(uint256 _tokenId) public view override returns (string memory) {
+        return string(abi.encodePacked("ipfs://", baseTokenCID(_tokenId), "/", Strings.toString(_tokenId)));
     }
 
     /**
      * This is used instead of msg.sender as transactions won't be sent by the original token owner, but by OpenSea.
      */
-    function _msgSender()
-        internal
-        override
-        view
-        returns (address sender)
-    {
+    function _msgSender() internal view override returns (address sender) {
         return ContextMixin.msgSender();
     }
+
+    /**
+     * ERC2981 Royalty Fee
+     * Sends Royalties to current Contract Owner
+     */
+    function royaltyInfo(uint256, uint256 value) external view override(IERC2981) returns (address receiver, uint256 royaltyAmount) {
+        receiver = owner();
+        royaltyAmount = (value * royaltyFee) / 10000;
+    }
+
+        /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC721, IERC165) returns (bool) {
+        return
+            interfaceId == type(IERC2981).interfaceId ||
+            super.supportsInterface(interfaceId);
+    }
+
 }

@@ -1,22 +1,15 @@
 {
-  "name": "opensea-creatures",
+  "name": "ipfs-batch-mint",
   "version": "1.0.0",
-  "description": "OpenSea's smart contracts, including ERC721 templates, factories, and the storefront builder.",
+  "description": "ERC 721 token Contract with IPFS Metadata URI and Batch Mint Functionality",
   "main": "index.js",
-  "scripts": {
-    "ganache-cli": "ganache-cli -d -p 7545 --gasLimit=10000000",
-    "test": "DEPLOY_ALL=1 truffle test"
-  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ProjectOpenSea/opensea-creatures.git"
+    "url": "git+https://github.com/jaderabbittechnologies/ipfs-batch-mint.git"
   },
   "author": "support@opensea.io",
   "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/ProjectOpenSea/opensea-creatures/issues"
-  },
-  "homepage": "https://github.com/ProjectOpenSea/opensea-creatures#readme",
+  "homepage": "https://github.com/jaderabbittechnologies/ipfs-batch-mint#readme",
   "dependencies": {
     "@0x/subproviders": "^6.6.2",
     "@metamask/eth-sig-util": "^4.0.0",
